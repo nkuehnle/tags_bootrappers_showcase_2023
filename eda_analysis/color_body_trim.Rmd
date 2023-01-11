@@ -1,0 +1,498 @@
+---
+title: "Color, Body, Trim"
+author: "The Bootstrappers"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+### Notebook setup code
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Dependencies
+pkgs <- installed.packages()
+required.libs <- c("stringr", "ggplot2", "gridExtra", "confintr", "rcompanion", "kableExtra", "pcaPP", "ggmosaic", "effsize", "dplyr", "ggalluvial")
+for (p in required.libs){
+  if (p %in% pkgs){
+    # Pass
+  } else {
+    stop(paste("Missing package (", p, "), please install!", sep=""))
+  }
+}
+capture <- lapply(required.libs, require, character.only = TRUE)
+```
+
+```{r, include=FALSE}
+CWD <- getwd()
+HOME <- dirname(CWD)
+DATA <- file.path(HOME, "data")
+SRC <- file.path(HOME, "src", "r")
+### Change path if it is not in the same folder as the notebook you are using
+source(file.path(SRC, "carmax_helper_funcs.R"),
+       local = knitr::knit_global())
+source(file.path(SRC, "fastkendall.R"),
+       local = knitr::knit_global())
+source(file.path(SRC, "transaction_mosaic.R"),
+       local = knitr::knit_global())
+```
+
+```{r}
+# This creates midpoint/range columns for price and appraisal_offer, jittered versions of price/appraisal_offer
+# Sets proper factor level order/ranks for: price, appraisal_offer, mileage/mileage_appraised, cylinders/cylinders_appraised, engine/engine_appraised
+# Also sets market as a factor to make sure it isn't treated as numeric.
+# Creates a continuous/numeric version of engine/engine_appraised --> engineCont/engine_appraisalCont
+# Setting replace.file = T will save over the original file adding the jittered values for price so that they don't need to be calculated again.
+kmax.data <- load.carmax.data(data.path = file.path(DATA, "ShowcaseDataWinter2023.csv"),
+                         replace.file = F,
+                         jitter = F)
+```
+
+# Goals of notebook
+
+1. Investigate how aesthetic elements such as color, body, and trim are associated with one another
+2. Investigate whether aesthetic elements have an impact on (cost-related) purchasing behaviors
+
+# Quick EDA
+
+Let's take a look at how many values are missing...
+```{r}
+kmax.data <- kmax.data %>%
+  mutate(color=ifelse(color == "Unknown", NA, color), color_appraisal=ifelse(color_appraisal == "Unknown", NA, color_appraisal))
+
+naCol <- c(sum(is.na(kmax.data$color_appraisal)), sum(is.na(kmax.data$color)))
+naBody <- c(sum(is.na(kmax.data$body_appraisal)), sum(is.na(kmax.data$body)))
+naTrim <- c(sum(is.na(kmax.data$trim_descrip_appraisal)), sum(is.na(kmax.data$trim_descrip)))
+data.frame(color=naCol, body=naBody, trim=naTrim, row.names=c("appraisal","purchase"))
+```
+
+```{r}
+eda_g1 <- ggplot(data=kmax.data, aes(x=color_appraisal)) +
+  geom_bar() +
+  labs(title="Frequency of Appraisal Colors", x="Color", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+eda_g2 <- ggplot(data=kmax.data, aes(x=color)) +
+  geom_bar() +
+  labs(title="Frequency of Purchase Colors", x="Color", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(eda_g1, eda_g2, ncol=1)
+```
+We can see that relatively neutral colors such as black, gray, silver, and white are the most popular and that appraisal colors and purchase colors take on roughly the same distribution.
+
+```{r}
+colors <- read.csv(file=file.path(DATA, "colors.csv"), na=)
+colors
+if (!("warmth" %in% colnames(kmax.data))){
+  kmax.data <- merge(kmax.data, colors, by="color")
+  colnames(colors) <- c("color_appraisal","warmth_appraisal","metallic_appraisal")
+  kmax.data <- merge(kmax.data, colors, by="color_appraisal")
+  }
+```
+
+```{r}
+eda_g3 <- ggplot(data=kmax.data, aes(x=warmth_appraisal)) +
+  geom_bar() +
+  labs(title="Frequency of Appraisal Colors by Warmth", x="Color", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+eda_g4 <- ggplot(data=kmax.data, aes(x=warmth)) +
+  geom_bar() +
+  labs(title="Frequency of Purchase Colors by Warmth", x="Color Warmth", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(eda_g3, eda_g4, ncol=1)
+
+eda_g5 <- ggplot(data=kmax.data, aes(x=metallic_appraisal)) +
+  geom_bar() +
+  labs(title="Frequency of Appraisal Colors by Metallicity", x="Metallic", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+eda_g6 <- ggplot(data=kmax.data, aes(x=metallic)) +
+  geom_bar() +
+  labs(title="Frequency of Purchase Colors by Metallicity", x="Metallic", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(eda_g5, eda_g6, ncol=1)
+```
+
+```{r}
+eda_g7 <- ggplot(data=kmax.data, aes(x=body_appraisal)) +
+  geom_bar() +
+  labs(title="Frequency of Appraisal Body Types", x="Body Type", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+eda_g8 <- ggplot(data=kmax.data, aes(x=body)) +
+  geom_bar() +
+  labs(title="Frequency of Purchase Body Types", x="Body Type", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(eda_g7, eda_g8, ncol=1)
+```
+Overall these seem similar, though there is a strong discrepancy in the number of NA values in the purchased vehicles and the "F" body type seems notably less common among purchased vehicles.
+
+```{r}
+eda_g9 <- ggplot(data=kmax.data, aes(x=trim_descrip_appraisal)) +
+  geom_bar() +
+  labs(title="Frequency of Appraisal Trim Types", x="Trim Type", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+eda_g10 <- ggplot(data=kmax.data, aes(x=trim_descrip)) +
+  geom_bar() +
+  labs(title="Frequency of Purchase Trim Types", x="Trim Types", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(eda_g9, eda_g10, ncol=1)
+```
+There seem to be more cars with premium trim among the purchases than the appraisals.
+
+# How do the aesthetic elements of color, body, and trim relate to one another?
+
+For now, we will work with the data in a long format, considering both appraisal and purchase vehicles as one.
+
+```{r}
+newCols <- data.frame(purchase_cols=c("warmth","metallic"), appraisal_cols=c("warmth_appraisal","metallic_appraisal"))
+long.data <- suppressWarnings(carmax.data.toLong(kmax.data, additional_cols=newCols))
+```
+
+The proportions of color/color-related variables vs trim type can be found below:
+```{r}
+color.trimTab <- table(long.data$color, long.data$trim_descrip)
+prop.table(color.trimTab, margin=1)
+color.trimTest <- chisq.test(color.trimTab, correct=T)
+color.trimCramersV <- suppressWarnings(cramersv(color.trimTest))
+color.trimCowensW <- cohenW(color.trimTab)
+color.trimPVal <- color.trimTest$p.value
+color.trimTest
+
+
+warmth.trimTab <- table(long.data$warmth, long.data$trim_descrip)
+prop.table(warmth.trimTab, margin=1)
+warmth.trimTest <- chisq.test(warmth.trimTab, correct=T)
+warmth.trimCramersV <- suppressWarnings(cramersv(warmth.trimTest))
+warmth.trimCowensW <- cohenW(warmth.trimTab)
+warmth.trimPVal <- warmth.trimTest$p.value
+warmth.trimTest
+
+metal.trimTab <- table(long.data$metallic, long.data$trim_descrip)
+prop.table(metal.trimTab, margin=1)
+metal.trimTest <- chisq.test(metal.trimTab, correct=T)
+metal.trimCramersV <- suppressWarnings(cramersv(metal.trimTest))
+metal.trimCowensW <- cohenW(metal.trimTab)
+metal.trimPVal <- metal.trimTest$p.value
+metal.trimTest
+```
+First, we tested whether color (or warmth of the color/metallicity) was associated with the trim type. To do this, we performed Chi-Square testing and found evidence of a significant association for color (p = `r formatC(color.trimPVal, format = "e", digits = 3)`), warmth (p = `r formatC(warmth.trimPVal, format = "e", digits = 3)`), and metallicity (p = `r formatC(metal.trimPVal, format = "e", digits = 3)`).
+
+We next used Cramer's V and Cohen's $\omega$ to approximate the effect size of this association and found that the effect size was virtually 0.
+
+* Cramer's V: color = `r color.trimCramersV`, warmth = `r warmth.trimCramersV`, metallicity = `r metal.trimCramersV`.
+* Cohen's $\omega$: color = `r color.trimCowensW`, warmth = `r warmth.trimCowensW`, metallicity = `r metal.trimCowensW`.
+
+Next, we repeated this analysis for body type vs trim type. The proportions for each combination can be found below.
+```{r}
+body.trimTab <- table(long.data$body, long.data$trim_descrip)
+prop.table(body.trimTab, margin=1)
+
+body.trimTest <- chisq.test(body.trimTab, correct=T)
+body.trimCramersV <- suppressWarnings(cramersv(body.trimTest))
+body.trimCowensW <- cohenW(body.trimTab)
+body.trimPVal <- body.trimTest$p.value
+body.trimTest
+```
+
+As above, we tested whether body type was associated with trim type. To do this, we performed Chi-Square testing and found evidence of a significant association for body type with trim type (p = `r formatC(body.trimPVal, format = "e", digits = 3)`). Unlike with color, the effect size here was at least somewhat meaningful, though it can still be considered "small" (Cramer's  V = `r body.trimCramersV`; Cohen's $\omega$ = `r body.trimCowensW`).
+
+Notably, the odds of a car with body type F having premium trim is considerably beneath that of other makes, while H (and to a lesser extent E and G) have considerably greater odds of having premium trim. The full odds ratios of each body type having premium trim can be found below, the odds ratio for all vehicles is `r prop.table(table(long.data$trim_descrip))[2]/prop.table(table(long.data$trim_descrip))[1]`.
+
+```{r}
+body.trimOR <- prop.table(body.trimTab, margin=1)[,2]/prop.table(body.trimTab, margin=1)[,1]
+body.trimOR
+```
+
+```{r}
+color.bodyTab <- table(long.data$color, long.data$body)
+color.bodyTest <- fisher.test(color.bodyTab, simulate.p.value = T, B=10000)
+color.bodyCramersV <- suppressWarnings(cramersv(chisq.test(color.bodyTab)))
+color.bodyCowensW <- cohenW(color.bodyTab)
+color.bodyPVal <- color.bodyTest$p.value
+color.bodyTest
+```
+
+# How do the aesthetics of appraised cars and purchased cars relate?
+Next, we will look at the relationships between the aesthetics of appraised cars and the cars that the customer eventually purchased.
+
+```{r}
+colorTab <- table(kmax.data$color_appraisal, kmax.data$color)
+fullColor <- kmax.data[,c("color_appraisal","color","warmth","warmth_appraisal","metallic","metallic_appraisal")]
+fullColor <- fullColor[complete.cases(fullColor),]
+fullColor$color_match <- fullColor$color_appraisal == fullColor$color
+pctSameColor <- sum(fullColor$color_match)/nrow(fullColor)*100
+pctSameWarmth <- sum(fullColor$warmth_appraisal == fullColor$warmth)/nrow(fullColor)*100
+pctSameMetal <- sum(fullColor$metallic_appraisal == fullColor$metallic)/nrow(fullColor)*100
+```
+Among transactions where both appraisal color and purchase color are known, `r formatC(pctSameColor, digits=3)`% retained the same color vehicle, while `r formatC(pctSameWarmth, digits=3)`% purchased a vehicle with similar color warmth, and `r formatC(pctSameMetal, digits=3)`% purchased a color with similar metallicity.
+
+We next looked at how likely customers were to purchase vehicles with similar color characteristics 
+
+Frequency of color retention rate by appraisal color is shown below:
+```{r}
+matchDF  <- NA # Empty variable to create DF at
+colors <- unique(fullColor$color_appraisal)
+for (c in colors){
+  fullColor$is_color <- fullColor$color_appraisal == c
+  colorMatchTable <- table(fullColor$is_color, fullColor$color_match)
+  colorMatchTest <- chisq.test(colorMatchTable, correct=T)
+  colorMatchPVal <- colorMatchTest$p.value
+  colorMatchCramersV <- cramersv(colorMatchTest)
+  colorMatchCowensW <- cohenW(colorMatchTable)
+  
+  # Build data frame
+  newRow <- data.frame(row.names=c, p.value=colorMatchPVal, CramersV=colorMatchCramersV, CowensW=colorMatchCowensW)
+
+  if (class(matchDF) != "data.frame"){
+    matchDF <- newRow
+  } else {
+    matchDF <- rbind(matchDF, newRow) 
+  }
+}
+
+colorMatchTab <- table(fullColor$color_appraisal, fullColor$color_match)
+totalCases <- colorMatchTab[,1]+colorMatchTab[,2]
+matchRates <- colorMatchTab[,2]/totalCases
+matchDF$MatchRate <- matchRates
+matchDF$NumAppraisals <- totalCases
+matchDF$NumPurchases <- table(fullColor$color)
+matchDF$p.adj <- p.adjust(matchDF$p.value, method="bonferroni")
+matchDF <- matchDF[,c("MatchRate","NumAppraisals","NumPurchases","CramersV","CowensW","p.value","p.adj")]
+matchDF <- matchDF[order(-matchDF$NumAppraisals),]
+matchDF$significant <- matchDF$p.adj < .025
+matchDF %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2, color = "white",
+              background = spec_color(matchDF$MatchRate,
+                                      begin = 0,
+                                      end = 1))
+
+matchDF %>% filter((significant) & (MatchRate > pctSameColor)) %>% row.names -> highMatchColors
+matchDF %>% filter((significant) & (MatchRate < pctSameColor)) %>% row.names -> lowMatchColors
+
+colorMatchTest <- chisq.test(colorMatchTab, correct=T)
+colorMatchPVal <- colorMatchTest$p.value
+colorMatchCramersV <- cramersv(colorMatchTest)
+colorMatchCowensW <- cohenW(colorMatchTab)
+colorMatchTest
+```
+Notably, the likelihood of a car customer purchasing a car with the same color is highly dependent on the appraisal color ($\chi^2$ test: $p = $`r colorMatchPVal`; Cramer's V = `r colorMatchCramersV`, Cohen's $\omega$ = `r colorMatchCowensW`), with owners of Black/Gray/White cars being the most likely to keep their original car color, though the effect size is quite negligible im most cases.
+
+```{r}
+freqMatchRateCor <- cor.test(matchDF$MatchRate, matchDF$NumAppraisals+matchDF$NumAppraisals, method="spearman")
+freqMatchRateCor
+```
+Interestingly, the likelihood of a customer sticking with a particular color of car was highly correlated with its overall popularity (Spearman's $\rho = $`r freqMatchRateCor$estimate`; $p = $`r freqMatchRateCor$p.value`)
+
+```{r, fig.width=8, fig.height=12}
+colorFreq <- fullColor %>%
+  count(color_appraisal, color) %>%
+  mutate(proportions = prop.table(n))
+
+colorFreq <- colorFreq[order(colorFreq$proportions),]
+
+gg_alluv1 <- ggplot(colorFreq, aes(y = proportions, axis1 = color_appraisal, axis2 = color)) +
+  geom_alluvium(aes(fill = color_appraisal),width = 1/12) +
+  scale_fill_manual(values=c("black", "darkblue","burlywood3","darkorchid4","goldenrod3", "gray20", "green","orange","cornsilk2","purple","red","azure3","chocolate4","grey80","gold1")) +
+  geom_stratum(width = 1/12, fill = "black",colour = "white") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Flow of Appraisal Makes to Purchase Makes", y="Proportion of Transactions") +
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv1))
+```
+
+```{r}
+```
+
+```{r}
+```
+
+# Do aesthetics relate meaningfully to (cost-related) purchasing behaviors?
+```{r}
+completeColorDF <- kmax.data[,c("appraisal_offer","price", "color_appraisal", "warmth_appraisal", "metallic_appraisal")]
+completeColorDF <- completeColorDF[complete.cases(completeColorDF),]
+
+completeTrimDF <- kmax.data[,c("appraisal_offer","price", "trim_descrip_appraisal")]
+completeTrimDF <- completeTrimDF[complete.cases(completeTrimDF),]
+
+completeBodyDF <- kmax.data[,c("appraisal_offer","price", "body_appraisal")]
+completeBodyDF <- completeBodyDF[complete.cases(completeBodyDF),]
+```
+## Do aesthetics impact pricing?
+
+## Do aesthetics impact the association between appraisal price and purchase price?
+
+### Does color impact the association betweeen appraisal price and purchase price?
+```{r}
+colorComps <- kendallComp(completeColorDF,
+                          comps = list(color="color_appraisal",
+                                       warmth="warmth_appraisal",
+                                       metallic="metallic_appraisal"),
+                          bootstrap = T,
+                          B = 5000,
+                          verbosity = 1)
+fullColorTau <- colorComps$fullTau
+```
+```{r fig.width=12, fig.height=10}
+fullPricePlot.color <- transactionMosaic(kmax.data, tau=fullColorTau$est, sublabel="Color: All Colors")
+suppressWarnings(fullPricePlot.color)
+```
+
+```{r fig.width=8, fig.height=12}
+transactionFreq <- completeColorDF %>%
+  count(appraisal_offer, price) %>%
+  mutate(proportions = prop.table(n))
+
+gg_alluv7 <- ggplot(transactionFreq,
+       aes(y = proportions, axis1 = appraisal_offer, axis2 = price)) +
+  geom_alluvium(aes(fill = appraisal_offer),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Appraisal Offer vs Price\n(All Colors)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv7))
+```
+To determine whether any makes deviated significantly from this, we calculated Kendall's $\tau$ and 95% confidence intervals within each make and compared them to the full data set.
+The results of this comparison can be found below.
+```{r}
+tauDF <- colorComps$results$color
+tauDF <- tauDF[order(tauDF$tau),]
+tauDF %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2,
+              color = "white",
+              background = spec_color(tauDF$tau,
+                                      begin = 0,
+                                      end = 1))
+
+sigColors <- rownames(tauDF[tauDF$significant,])
+```
+
+```{r}
+tauDF <- colorComps$results$warmth
+tauDF <- tauDF[order(tauDF$tau),]
+tauDF %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2,
+              color = "white",
+              background = spec_color(tauDF$tau,
+                                      begin = 0,
+                                      end = 1))
+
+sigWarmth <- rownames(tauDF[tauDF$significant,])
+```
+
+```{r}
+tauDF <- colorComps$results$metallic
+tauDF <- tauDF[order(tauDF$tau),c("tau","lower","upper")]
+tauDF
+```
+
+The following makes appear to have a different correlation compared to the overall data set: `r paste(sigMakes, collapse=", ")`
+
+These are visualized below.
+
+### Does body type impact the association between appraisal offer and purchase price?
+```{r}
+bodyComps <- kendallComp(completeBodyDF,
+                          comps = list(body="body_appraisal"),
+                          bootstrap = T,
+                          B = 5000,
+                          verbosity = 1)
+fullBodyTau <- bodyComps$fullTau
+```
+
+```{r fig.width=12, fig.height=10}
+fullPricePlot.body <- transactionMosaic(completeBodyDF, tau=fullBodyTau$est, sublabel="Body: All Body Types")
+suppressWarnings(fullPricePlot.body)
+```
+
+```{r fig.width=8, fig.height=12}
+transactionFreq <- completeBodyDF %>%
+  count(appraisal_offer, price) %>%
+  mutate(proportions = prop.table(n))
+
+gg_alluv8 <- ggplot(transactionFreq,
+       aes(y = proportions, axis1 = appraisal_offer, axis2 = price)) +
+  geom_alluvium(aes(fill = appraisal_offer),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Appraisal Offer vs Price\n(All Body Types)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv8))
+```
+To determine whether any makes deviated significantly from this, we calculated Kendall's $\tau$ and 95% confidence intervals within each make and compared them to the full data set.
+The results of this comparison can be found below.
+```{r}
+tauDF <- bodyComps$results$body
+tauDF <- tauDF[order(tauDF$tau),]
+tauDF %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2,
+              color = "white",
+              background = spec_color(tauDF$tau,
+                                      begin = 0,
+                                      end = 1))
+
+sigBodies <- rownames(tauDF[tauDF$significant,])
+```
+
+### Does body type impact the association between appraisal offer and purchase price?
+```{r}
+trimComps <- kendallComp(completeTrimDF,
+                          comps = list(trim="trim_descrip_appraisal"),
+                          bootstrap = T,
+                          B = 7500,
+                          verbosity = 1)
+fullTrimTau <- trimComps$fullTau
+```
+
+```{r fig.width=12, fig.height=10}
+fullPricePlot.trim <- transactionMosaic(completeTrimDF, tau=fullTrimTau$est, sublabel="All Trim Types")
+suppressWarnings(fullPricePlot.trim)
+```
+
+```{r fig.width=8, fig.height=12}
+transactionFreq <- completeTrimDF %>%
+  count(appraisal_offer, price) %>%
+  mutate(proportions = prop.table(n))
+
+gg_alluv8 <- ggplot(transactionFreq,
+       aes(y = proportions, axis1 = appraisal_offer, axis2 = price)) +
+  geom_alluvium(aes(fill = appraisal_offer),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Appraisal Offer vs Price\n(All Body Types)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv8))
+```
+To determine whether any makes deviated significantly from this, we calculated Kendall's $\tau$ and 95% confidence intervals within each make and compared them to the full data set.
+The results of this comparison can be found below.
+```{r}
+tauDF <- trimComps$results$trim
+tauDF <- tauDF[order(tauDF$tau),c("tau","lower","upper")]
+tauDF
+```

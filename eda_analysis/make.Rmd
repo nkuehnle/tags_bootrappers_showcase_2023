@@ -1,0 +1,553 @@
+---
+title: "Brand-to-brand relationships and brand-to-pricing relationships"
+author: "The Bootstrappers"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+### Notebook setup code
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Dependencies
+pkgs <- installed.packages()
+required.libs <- c("stringr", "ggplot2", "gridExtra", "confintr", "rcompanion", "kableExtra", "pcaPP", "ggmosaic", "effsize", "dplyr", "ggalluvial")
+for (p in required.libs){
+  if (p %in% pkgs){
+    # Pass
+  } else {
+    stop(paste("Missing package (", p, "), please install!", sep=""))
+  }
+}
+capture <- lapply(required.libs, require, character.only = TRUE)
+```
+
+```{r, include=FALSE}
+CWD <- getwd()
+HOME <- dirname(CWD)
+DATA <- file.path(HOME, "data")
+SRC <- file.path(HOME, "src", "r")
+### Change path if it is not in the same folder as the notebook you are using
+source(file.path(SRC, "carmax_helper_funcs.R"),
+       local = knitr::knit_global())
+source(file.path(SRC, "fastkendall_ci.R"),
+       local = knitr::knit_global())
+source(file.path(SRC, "transaction_mosaic.R"),
+       local = knitr::knit_global())
+```
+
+```{r}
+# This creates midpoint/range columns for price and appraisal_offer, jittered versions of price/appraisal_offer
+# Sets proper factor level order/ranks for: price, appraisal_offer, mileage/mileage_appraised, cylinders/cylinders_appraised, engine/engine_appraised
+# Also sets market as a factor to make sure it isn't treated as numeric.
+# Creates a continuous/numeric version of engine/engine_appraised --> engineCont/engine_appraisalCont
+# Setting replace.file = T will save over the original file adding the jittered values for price so that they don't need to be calculated again.
+kmax.data <- load.carmax.data(data.path = file.path(DATA, "ShowcaseDataWinter2023.csv"),
+                         replace.file = F,
+                         jitter = F)
+```
+
+# Goals of notebook
+1. Investigate how appraisal make and purchase make relate (i.e. is there brand loyalty? are certain brands more frequently associated)
+2. Investigate how appraisal make can inform the (cost-related) purchasing behaviors of customers.
+
+# Quick EDA
+```{r}
+complete <- all(!is.na(kmax.data$make) & !is.na(kmax.data$make_appraisal))
+if (!complete){
+  warning("Incomplete make data.")
+}
+
+appraisedBrands <- unique(kmax.data$make_appraisal)
+purchasedBrands <- unique(kmax.data$make)
+commonBrands <- intersect(appraisedBrands, purchasedBrands)
+```
+
+`r length(appraisedBrands)` makes are represented in the appraised vehicles `r length(purchasedBrands)` makes are represented in the purchased vehicles, with `r length(commonBrands)` in common.
+
+Below I plot the frequency of each make within the appraisals and purchases.
+
+I excluded the "CJM" make from appraisals since it represents only `r nrow(kmax.data[kmax.data$make_appraisal == "CJM",])/nrow(kmax.data)*100`% of appraisals and is unique to the appraisals.
+```{r}
+eda_g1 <- ggplot(kmax.data[kmax.data$make_appraisal != "CJM",], aes(x=make_appraisal)) +
+  geom_bar() +
+  labs(title="Frequency of Appraisal Makes", x="Make", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+eda_g2 <- ggplot(kmax.data, aes(x=make)) +
+  geom_bar() +
+  labs(title="Frequency of Purchase Makes", x="Make", y="# Transcations") +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(eda_g1, eda_g2, ncol=1)
+
+top5.appraisalMakes <- rownames(sort(table(kmax.data$make_appraisal),decreasing=TRUE)[1:5])
+top5.purchaseMakes <- rownames(sort(table(kmax.data$make),decreasing=TRUE)[1:5])
+topMakes <- union(top5.appraisalMakes, top5.purchaseMakes)
+```
+Overall, we can see that around a half a dozen makes account for a disproportionate number of transactions and that visually the distribution of makes seems similar between appraisals and purchases.
+
+The top 5 appraisal makes are (in order): `r paste(top5.appraisalMakes, collapse=", ")`
+
+The top 5 purchase makes are (in order): `r paste(top5.purchaseMakes, collapse=", ")`
+
+# How do appraisal make and purchase make relate?
+
+## Is appraisal make associated with purchase make?
+```{r}
+set.seed(1329058293)
+brandTable <- table(kmax.data$make, kmax.data$make_appraisal)
+brandAssocPVal <- fisher.test(brandTable, simulate.p.value=TRUE, B=10000)$p.value
+brandAssocCramersV <- suppressWarnings(cramersv(chisq.test(brandTable)))
+brandAssocCowensW <- cohenW(brandTable)
+```
+We next tested whether appraisal make was associated strongly with purchase on an overall basis. To do this, we applied Fisher's exact test with 10,000 Monte Carlo simulations to determine an approximate p value and found evidence of a significant association (p = `r brandAssocPVal`) between appraisal brand and purchase brand. We next used Cramer's V and Cohen's $\omega$ to approximate the effect size of this association and found that the effect size was relatively small (Cramer's V = `r brandAssocCramersV`; Cohen's $\omega$ = `r brandAssocCramersV`). This is visualized below.
+
+```{r, fig.width=8, fig.height=12}
+transactionFreq <- kmax.data %>%
+  count(make_appraisal, make) %>%
+  mutate(proportions = prop.table(n))
+
+sortOrder <- kmax.data %>% count(make_appraisal) %>% arrange(desc(n)) %>% pull(make_appraisal)
+
+transactionFreq$make_appraisal <- factor(as.factor(transactionFreq$make_appraisal), levels=sortOrder)
+transactionFreq <- transactionFreq %>% arrange(desc(make_appraisal))
+
+gg_alluv1 <- ggplot(transactionFreq, aes(y = proportions, axis1 = make_appraisal, axis2 = make)) +
+  geom_alluvium(aes(fill = make_appraisal),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Flow of Appraisal Makes to Purchase Makes", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv1))
+```
+
+We can see that for many appraisal makes the most common purchase make is identical. To get a slightly clearer picture of what trends exist, let's look only at the transactions involving the top makes from above.
+
+```{r, fig.width=8, fig.height=12}
+gg_alluv2 <- ggplot(transactionFreq[(transactionFreq$make_appraisal %in% topMakes) & (transactionFreq$make %in% topMakes),],
+       aes(y = proportions, axis1 = make_appraisal, axis2 = make)) +
+  geom_alluvium(aes(fill = make_appraisal),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Flow of Appraisal Makes to Purchase Makes\n(Top 7 Appraisal Makes Only)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv2))
+```
+
+## Do Customer's Exhibit Brand Loyalty?
+```{r}
+kmax.data$brandLoyal <- kmax.data$make == kmax.data$make_appraisal
+kmax.data$brandLoyal <- ifelse(is.na(kmax.data$make) | is.na(kmax.data$make_appraisal), NA, kmax.data$brandLoyal)
+pctBrandLoyal <- sum(kmax.data$brandLoyal, na.rm=T)/sum(!is.na(kmax.data$brandLoyal))
+brandLoyaltyTable <- table(kmax.data$make_appraisal, kmax.data$brandLoyal)
+```
+Interestingly, and overall `r pctBrandLoyal*100`% of buyers purchased the same brand as their appraised vehicle, suggesting that there might be some degree of brand loyalty going into customer's decision.
+
+```{r}
+brandLoyaltyTest <- chisq.test(brandLoyaltyTable, correct=T)
+brandLoyaltyPVal <- brandLoyaltyTest$p.value
+brandLoyaltyCramersV <- cramersv(brandLoyaltyTest)
+brandLoyaltyCowensW <- cohenW(brandLoyaltyTable)
+```
+We wanted to determine whether loyalty differed by brand, so we applied a 37-sample proportion test (Chi-Square) to the appraisal makes to determine if there was a significant association between the appraised make and customer loyalty. Our results indicate that there is significant evidence in favor of an association between appraisal make and brand loyalty (p = `r brandLoyaltyPVal`), indicating that brands have differing levels of loyalty. We next used Cramer's V and Cohen's $\omega$ to approximate the effect size of this association and found that the effect size was relatively small (Cramer's V = `r brandLoyaltyCramersV`; Cohen's $\omega$ = `r brandLoyaltyCramersV`).
+
+```{r}
+loyaltyDF <- NA # Empty variable to create DF at
+appraisedBrands <- unique(kmax.data$make_appraisal)
+for (make in appraisedBrands){
+  makeDF <- kmax.data
+  makeDF$is_brand <- kmax.data$make_appraisal == make
+  makeLoyaltyTable <- table(makeDF$is_brand, makeDF$brandLoyal)
+  makeTest <- chisq.test(makeLoyaltyTable, correct=T)
+  makePVal <- makeTest$p.value
+  makeCramersV <- cramersv(makeTest)
+  makeCowensW <- cohenW(makeLoyaltyTable)
+  
+  # Build data frame
+  newRow <- data.frame(row.names=make, p.value=makePVal, CramersV=makeCramersV, CowensW=makeCowensW)
+
+  if (class(loyaltyDF) != "data.frame"){
+    loyaltyDF <- newRow
+  } else {
+    loyaltyDF <- rbind(loyaltyDF, newRow) 
+  }
+}
+```
+
+Loyalty rate by appraisal make is shown below:
+```{r}
+totalCases <- brandLoyaltyTable[,1]+brandLoyaltyTable[,2]
+loyaltyRates <- brandLoyaltyTable[,2]/totalCases
+loyaltyDF$LoyaltyRate <- loyaltyRates
+loyaltyDF$NumRecords <- totalCases
+loyaltyDF$p.adj <- p.adjust(loyaltyDF$p.value, method="bonferroni")
+loyaltyDF <- loyaltyDF[,c("LoyaltyRate","NumRecords","CramersV","CowensW","p.value","p.adj")]
+loyaltyDF <- loyaltyDF[order(-loyaltyDF$NumRecords),]
+loyaltyDF$significant <- loyaltyDF$p.adj < .025
+loyaltyDF %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2, color = "white",
+              background = spec_color(loyaltyDF$LoyaltyRate,
+                                      begin = 0,
+                                      end = 1))
+
+loyaltyDF %>% filter((significant) & (LoyaltyRate > pctBrandLoyal)) %>% row.names -> loyalBrands
+loyaltyDF %>% filter((significant) & (LoyaltyRate < pctBrandLoyal)) %>% row.names -> disloyalBrands
+```
+
+The following brands appear to have different loyalty rates from the overall data set:
+
+### Higher Loyalty
+
+`r paste(loyalBrands, collapse=", ")`
+
+```{r, fig.width=8, fig.height=12}
+gg_alluv3 <- ggplot(transactionFreq[transactionFreq$make_appraisal %in% loyalBrands,],
+       aes(y = proportions, axis1 = make_appraisal, axis2 = make)) +
+  geom_alluvium(aes(fill = make_appraisal),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Flow of Appraisal Makes to Purchase Makes\n(High Loyalty Brands)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv3))
+```
+
+### Lower Loyalty
+
+`r paste(disloyalBrands, collapse=", ")`
+
+```{r, fig.width=8, fig.height=12}
+gg_alluv4 <- ggplot(transactionFreq[transactionFreq$make_appraisal %in% disloyalBrands,],
+       aes(y = proportions, axis1 = make_appraisal, axis2 = make)) +
+  geom_alluvium(aes(fill = make_appraisal),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Flow of Appraisal Makes to Purchase Makes\n(Low Loyalty Brands)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv4))
+```
+Let's see how the flow plots and tests from the beginning look, excluding brand loyalty? Did brand loyalty alone drive the association between appraisal make and purchase make?
+
+```{r}
+disloyalBrandTable <- table(kmax.data[!kmax.data$brandLoyal, "make"], kmax.data[!kmax.data$brandLoyal,"make_appraisal"])
+brandAssocPVal2 <- fisher.test(disloyalBrandTable, simulate.p.value=TRUE, B=10000)$p.value
+brandAssocCramersV2 <- suppressWarnings(cramersv(chisq.test(disloyalBrandTable)))
+brandAssocCowensW2 <- cohenW(disloyalBrandTable)
+```
+Lastly, we repeated our original tests to determine whether appraisal make was associated strongly with purchase make after removing instances of brand loyalty. To do this, we applied Fisher's exact test with 10,000 Monte Carlo simulations to determine an approximate p value and found evidence of a significant association (p = `r brandAssocPVal2`) between appraisal brand and purchase brand. We next used Cramer's V and Cohen's $\omega$ to approximate the effect size of this association and found that the effect size was so minuscule to almost be non-existent (Cramer's V = `r brandAssocCramersV2`; Cohen's $\omega$ = `r brandAssocCramersV2`). This is visualized again below.
+
+```{r, fig.width=8, fig.height=12}
+transactionFreq <- kmax.data[!kmax.data$brandLoyal,] %>%
+  count(make_appraisal, make) %>%
+  mutate(proportions = prop.table(n))
+
+sortOrder <- kmax.data %>% count(make_appraisal) %>% arrange(desc(n)) %>% pull(make_appraisal)
+
+transactionFreq$make_appraisal <- factor(as.factor(transactionFreq$make_appraisal), levels=sortOrder)
+transactionFreq <- transactionFreq %>% arrange(desc(make_appraisal))
+
+gg_alluv5 <- ggplot(as.data.frame(transactionFreq), aes(y = proportions, axis1 = make_appraisal, axis2 = make)) +
+  geom_alluvium(aes(fill = make_appraisal),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Flow of Appraisal Makes to Purchase Makes\n(Brand Loyalty Excluded)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv5))
+```
+
+And again for the top makes only, we can see now that any apparent associations between particular brands is mostly negligible.
+```{r, fig.width=8, fig.height=12}
+gg_alluv6 <- ggplot(transactionFreq[(transactionFreq$make_appraisal %in% topMakes) & (transactionFreq$make %in% topMakes),],
+       aes(y = proportions, axis1 = make_appraisal, axis2 = make)) +
+  geom_alluvium(aes(fill = make_appraisal),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Flow of Appraisal Makes to Purchase Makes\n(Top Makes Only/Brand Loyalty Excluded)", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv6))
+```
+
+
+# How do appraisal make and/or brand loyalty impact price-related behaviors?
+For this we will look only at cases where there are no missing values for price, appraisal offer, or make_appraisal.
+```{r}
+kmax.data <- kmax.data[,c("make_appraisal","price", "appraisal_offer", "brandLoyal")]
+kmax.data <- kmax.data[complete.cases(kmax.data[,c("make_appraisal","price", "appraisal_offer")]),]
+```
+We can see that this is around 97.5% of the data, with `r nrow(kmax.data)` out of 200K cases remaining.
+
+## Does appraisal make impact appraisal offer and/or a purchase price?
+```{r}
+appraisalTest.appraisalMake <- kruskal.test(as.numeric(appraisal_offer)~make_appraisal, data=kmax.data)
+priceTest.appraisalMake <- kruskal.test(as.numeric(price)~make_appraisal, data=kmax.data)
+```
+We first tested whether appraisal offer and purchase price differed by appraisal make. To do this, we utilized the Kruskal-Wallis test, a non-parametric equivalent of the Chi-Square test for ordinal variables. In both the case of appraisal offer (p=`r appraisalTest.appraisalMake$p.value`) and purchase price (p=`r priceTest.appraisalMake$p.value`) we found that pricing was associated with the appraisal make. The distribution of pricing is visualized/summarized on the basis of appraisal make below.
+```{r}
+kmax.data %>% group_by(make_appraisal)%>% summarise(Median=median(as.numeric(appraisal_offer)), Mean=mean(as.numeric(appraisal_offer))) -> appraisalSummary.appraisalMake
+appraisalMedian <- median(as.numeric(kmax.data$appraisal_offer))
+appraisalSummary.appraisalMake$DiffersFromOverall <- (appraisalSummary.appraisalMake$Median > appraisalMedian) | (appraisalSummary.appraisalMake$Median < appraisalMedian)
+appraisalSummary.appraisalMake <- appraisalSummary.appraisalMake[order(appraisalSummary.appraisalMake$Mean),]
+appraisalSummary.appraisalMake %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2,
+              color = "white",
+              background = spec_color(appraisalSummary.appraisalMake$Median,
+                                      begin = 0,
+                                      end = 1)) %>%
+    column_spec(3,
+              color = "white",
+              background = spec_color(appraisalSummary.appraisalMake$Mean,
+                                      begin = 0,
+                                      end = 1))
+
+
+
+
+higherAppraisal.appraisalMake <- pull(appraisalSummary.appraisalMake[appraisalSummary.appraisalMake$Median > appraisalMedian,],"make_appraisal")
+lowerAppraisal.appraisalMake <- pull(appraisalSummary.appraisalMake[appraisalSummary.appraisalMake$Median < appraisalMedian,],"make_appraisal")
+```
+
+```{r fig.width=14, fig.height=8}
+sortedkmax.data <- kmax.data
+makeLevelsByAppraisal <- pull(appraisalSummary.appraisalMake[order(appraisalSummary.appraisalMake$Mean),],"make_appraisal")
+appraisalColorVec <- rep(NA, length(makeLevelsByAppraisal))
+for (i in 1:length(makeLevelsByAppraisal)){
+  if (makeLevelsByAppraisal[i] %in% lowerAppraisal.appraisalMake){
+    appraisalColorVec[i] <- "red"
+  } else if (makeLevelsByAppraisal[i] %in% higherAppraisal.appraisalMake){
+    appraisalColorVec[i] <- "green"
+  } else {
+       appraisalColorVec[i] <- "black" 
+      }
+}
+
+
+sortedkmax.data$make_appraisal <- factor(sortedkmax.data$make_appraisal, levels=makeLevelsByAppraisal)
+title <- "Appraisal Offer vs Appraisal Make"
+subtitle <- paste("Kruskal-Wallis: p = ", formatC(appraisalTest.appraisalMake$p.value, format = "e", digits = 3), sep=" ")
+subtitle <- paste("(", subtitle, ")", sep="")
+ggplot(data = sortedkmax.data) +
+  geom_mosaic(aes(x = product(appraisal_offer, make_appraisal), fill=appraisal_offer, offset=0)) + 
+  labs(title=paste(title, subtitle, sep="\n")) +
+  theme(axis.text.x = suppressWarnings(element_text(angle = 60, hjust=1, color=appraisalColorVec)),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+```
+
+The following appraisal makes have a median appraisal which differs from the median of the overall data set:
+
+### Higher Appraisals
+
+`r paste(higherAppraisal.appraisalMake, collapse=", ")`
+
+### Lower Appraisals
+
+`r paste(lowerAppraisal.appraisalMake, collapse=", ")`
+
+```{r}
+kmax.data %>% group_by(make_appraisal)%>% summarise(Median=median(as.numeric(price)), Mean=mean(as.numeric(price))) -> priceSummary.appraisalMake
+priceMedian <- median(as.numeric(kmax.data$price))
+priceSummary.appraisalMake$DiffersFromOverall <- (priceSummary.appraisalMake$Median > priceMedian) | (priceSummary.appraisalMake$Median < priceMedian)
+
+priceSummary.appraisalMake <- priceSummary.appraisalMake[order(priceSummary.appraisalMake$Mean),]
+
+priceSummary.appraisalMake %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2,
+              color = "white",
+              background = spec_color(priceSummary.appraisalMake$Median,
+                                      begin = 0,
+                                      end = 1)) %>%
+    column_spec(3,
+              color = "white",
+              background = spec_color(priceSummary.appraisalMake$Mean,
+                                      begin = 0,
+                                      end = 1))
+
+higherPrice.appraisalMake <- pull(priceSummary.appraisalMake[priceSummary.appraisalMake$Median > priceMedian,],"make_appraisal")
+lowerPrice.appraisalMake <- pull(priceSummary.appraisalMake[priceSummary.appraisalMake$Median < priceMedian,],"make_appraisal")
+```
+
+```{r fig.width=14, fig.height=10}
+makeLevelsByPrice <- pull(priceSummary.appraisalMake[order(priceSummary.appraisalMake$Mean),],"make_appraisal")
+priceColorVec <- rep(NA, length(makeLevelsByPrice))
+for (i in 1:length(makeLevelsByPrice)){
+  if (makeLevelsByPrice[i] %in% lowerPrice.appraisalMake){
+    priceColorVec[i] <- "red"
+  } else if (makeLevelsByPrice[i] %in% higherPrice.appraisalMake){
+    priceColorVec[i] <- "green"
+  } else {
+       priceColorVec[i] <- "black" 
+      }
+}
+
+
+sortedkmax.data$make_appraisal <- factor(sortedkmax.data$make_appraisal, levels=makeLevelsByPrice)
+title <- "Purchase Price vs Appraisal Make"
+subtitle <- paste("Kruskal-Wallis: p = ", formatC(priceTest.appraisalMake$p.value, format = "e", digits = 3), sep=" ")
+subtitle <- paste("(", subtitle, ")", sep="")
+ggplot(data = sortedkmax.data) +
+  geom_mosaic(aes(x = product(price, make_appraisal), fill=price, offset=0)) + 
+  labs(title=paste(title, subtitle, sep="\n")) +
+  theme(axis.text.x = suppressWarnings(element_text(angle = 60, hjust=1, color=priceColorVec)),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+```
+
+The following appraisal makes have a median purchase price which differs from the median of the overall data set:
+
+### Higher Purchases
+
+`r paste(higherPrice.appraisalMake, collapse=", ")`
+
+### Lower Purchases
+
+`r paste(lowerPrice.appraisalMake, collapse=", ")`
+
+## Does the appraisal make impact the relationship between appraisal offer and purchase price differ?
+Next, we tested whether the relationship between appraisal offer and purchase price differed between brands. To do this, we calculated Kendall's $\tau$ correlation coefficients, which effectively handles ordinal data, and calculated confidence intervals from 5000 bootstrapped replicates. 
+
+```{r}
+makeComp <- kendallComp(kmax.data,
+                        comps = list(make="make_appraisal"),
+                        bootstrap = T,
+                        B = 5000,
+                        verbosity = 1)
+fullTau <- makeComp$fullTau
+```
+We found that the overall data set (excluding cases where appraisal price or purchase price was missing) had a Tau value of `r fullTau$est` with a 95% confidence interval between `r fullTau$lower` and `r fullTau$upper`.
+
+Two plots are included below to demonstrate how purchaser's overall behave within the data set. First, a mosaic plot representing the conditional proportions of each combination and finally an alluvial plot which shows how appraisal offers flow into different groupings of purchase prices.
+
+```{r fig.width=12, fig.height=10}
+fullPricePlot <- transactionMosaic(kmax.data, tau=fullTau$est, sublabel="Make: All Makes")
+fullPricePlot
+```
+
+```{r fig.width=8, fig.height=12}
+transactionFreq <- kmax.data %>%
+  count(appraisal_offer, price) %>%
+  mutate(proportions = prop.table(n))
+
+gg_alluv7 <- ggplot(transactionFreq,
+       aes(y = proportions, axis1 = appraisal_offer, axis2 = price)) +
+  geom_alluvium(aes(fill = appraisal_offer),width = 1/12) +
+  geom_stratum(width = 1/12, fill = "black",colour = "grey") +
+  geom_label(stat = "stratum", infer.label = TRUE) +
+  labs(title="Appraisal Offer vs Price", y="Proportion of Transactions") +
+  theme(plot.title = element_text(hjust = 0.5))
+suppressWarnings(print(gg_alluv7))
+```
+
+To determine whether any makes deviated significantly from this, we calculated Kendall's $\tau$ and 95% confidence intervals within each make and compared them to the full data set.
+The results of this comparison can be found below.
+
+```{r}
+tauDF <- makeComp$results$make
+tauDF <- tauDF[order(tauDF$tau),]
+tauDF %>%
+  kbl() %>%
+  kable_paper(full_width = F) %>%
+  column_spec(2,
+              color = "white",
+              background = spec_color(tauDF$tau,
+                                      begin = 0,
+                                      end = 1))
+
+sigMakes <- rownames(tauDF[tauDF$significant,])
+```
+The following makes appear to have a different correlation compared to the overall data set: `r paste(sigMakes, collapse=", ")`
+
+These are visualized below.
+
+### Makes with a greater association than the overall dataset
+```{r fig.width=12, fig.height=10}
+gtMakes <- rownames(tauDF[(tauDF$tau > fullTau$est) & tauDF$significant,])
+
+for (i in 1:length(gtMakes)){
+  make <- gtMakes[i]
+  makeDF <- kmax.data[kmax.data$make_appraisal == make,]
+  tau <- tauDF[rownames(tauDF) == make, "tau"]
+  print(transactionMosaic(makeDF, tau=tau, sublabel=paste("Make:", make)))
+}
+```
+
+### Makes with a weaker association than the overall dataset
+```{r fig.width=12, fig.height=10}
+ltMakes <- rownames(tauDF[(tauDF$tau < fullTau$est) & tauDF$significant,])
+
+for (i in 1:length(ltMakes)){
+  make <- ltMakes[i]
+  makeDF <- kmax.data[kmax.data$make_appraisal == make,]
+  tau <- tauDF[rownames(tauDF) == make, "tau"]
+  print(transactionMosaic(makeDF, tau=tau, sublabel=paste("Make:", make)))
+}
+```
+
+## Does brand loyalty impact pricing behavior?
+### Does appraisal offer/purchase price differ for brand loyal customers?
+```{r}
+appraisalTest.loyalty <- wilcox.test(formula=as.numeric(appraisal_offer) ~ brandLoyal, data=kmax.data,
+                                   na.rm=T, paired=F, exact=F)
+
+appraisalVDA.loyalty <- VD.A(d=as.numeric(kmax.data$appraisal_offer), f=as.numeric(kmax.data$brandLoyal))
+```
+We first tested whether brand loyal customers demonstrated differences in appraisal offer using the Mann-Whitney U test. This indicated that appraisal offers were significantly higher in customer's exhibiting brand loyalty (p = `r appraisalTest.loyalty$p.value`). To quantify the magnitude of this effect, we turned to Vargha and Delaney's A value. An A value of .5 is equivalent to no effect. In this case, the observed effect can be considered `r appraisalVDA.loyalty$magnitude` (A = `r appraisalVDA.loyalty$estimate`).
+
+```{r}
+priceTest.loyalty <- wilcox.test(formula=as.numeric(price) ~ brandLoyal, data=kmax.data,
+                                   na.rm=T, paired=F, exact=F)
+
+priceVDA.loyalty <- VD.A(d=as.numeric(kmax.data$appraisal_offer), f=as.numeric(kmax.data$brandLoyal))
+```
+We repeated the above approach for purchase price, which again indicated that purchase price were significantly higher in customer's exhibiting brand loyalty (p = `r priceTest.loyalty$p.value`). Here, the observed effect can be considered `r priceVDA.loyalty$magnitude` (A = `r priceVDA.loyalty$estimate`).
+
+These results of these analyses are visualized below.
+
+```{r fig.width=12, fig.height=10}
+p <- appraisalTest.loyalty$p.value
+
+title <- "Appraisal Offer vs Brand Loyalty"
+subtitle <- paste("(", "Mann-Whitney U Test: p = ", formatC(p, format = "e", digits = 3), ")", sep="")
+ggplot(data = kmax.data) +
+  geom_mosaic(aes(x = product(appraisal_offer, brandLoyal), fill=appraisal_offer, offset=0)) + 
+  labs(title=paste(title, subtitle, sep="\n")) +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+```
+
+```{r fig.width=12, fig.height=10}
+p <- priceTest.loyalty$p.value
+
+title <- "Purchase Price vs Brand Loyalty"
+subtitle <- paste("(", "Mann-Whitney U Test: p = ", formatC(p, format = "e", digits = 4), ")", sep="")
+
+ggplot(data = kmax.data) +
+  geom_mosaic(aes(x = product(price, brandLoyal), fill=price, offset=0)) + 
+  labs(title=paste(title, subtitle, sep="\n")) +
+  theme(axis.text.x = element_text(angle = 60, hjust=1),
+        axis.text.y = element_text(angle = 0, vjust=1),
+        plot.title = element_text(hjust = 0.5))
+```
+
+### Does the relationship between appraisal offer and purchase price differ in brand loyal customers?
+```{r}
+brandLoyalPrices <- kmax.data[kmax.data$brandLoyal,]
+notBrandLoyalPrices <- kmax.data[!kmax.data$brandLoyal,]
+brandLoyalTau <- fastKendall.ci(as.numeric(brandLoyalPrices$price), as.numeric(brandLoyalPrices$appraisal_offer), bootstrap=T, B=5000, verbose=T)
+notBrandLoyalTau <- fastKendall.ci(as.numeric(notBrandLoyalPrices$price), as.numeric(notBrandLoyalPrices$appraisal_offer), bootstrap=T, B=5000, verbose=T)
+```
+We next explored whether the relationship between appraisal offer and purchase price differed based on whether the customer exhibited brand loyalty by constructing 95% confidence intervals for Kendall's $\tau$ as previously. This indicated that customers exhibiting brand loyalty had a slightly stronger (but significant) association between appraisal offer and purchase price: $\tau = $ `r brandLoyalTau$est` (95% CI: `r brandLoyalTau$lower`-`r brandLoyalTau$upper`) vs `r notBrandLoyalTau$est` (95% CI: `r notBrandLoyalTau$lower`-`r notBrandLoyalTau$upper`).
+
+```{r fig.width=12, fig.height=10}
+transactionMosaic(brandLoyalPrices, tau=brandLoyalTau$est, sublabel="Brand Loyal")
+transactionMosaic(notBrandLoyalPrices, tau=notBrandLoyalTau$est, sublabel="Not Brand Loyal")
+```
